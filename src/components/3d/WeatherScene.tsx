@@ -48,7 +48,7 @@ function getSceneConfig(weatherCode: number | null): SceneConfig {
   }
 
   if (
-    (weatherCode !== null && weatherCode >= 51 && weatherCode <= 65) ||
+    (weatherCode !== null && weatherCode >= 51 && weatherCode <= 67) ||
     weatherCode === 80 ||
     weatherCode === 81 ||
     weatherCode === 82
@@ -67,7 +67,12 @@ function getSceneConfig(weatherCode: number | null): SceneConfig {
     }
   }
 
-  if (weatherCode !== null && weatherCode >= 71 && weatherCode <= 75) {
+  if (
+    weatherCode === 77 ||
+    weatherCode === 85 ||
+    weatherCode === 86 ||
+    (weatherCode !== null && weatherCode >= 71 && weatherCode <= 75)
+  ) {
     return {
       background: '#e2e8f0',
       ambientIntensity: 0.6,
