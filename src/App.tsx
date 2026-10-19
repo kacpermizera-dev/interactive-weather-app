@@ -1,36 +1,214 @@
 import { useEffect, useState } from 'react'
-import { fetchCurrentWeather, type WeatherData } from './api/weather'
-import { WeatherScene } from './components/3d/WeatherScene'
-import { WeatherCard } from './components/ui/WeatherCard'
+import {
+  fetchCurrentWeather,
+  searchLocationsByName,
+  type WeatherData,
+} from './api/weather'
+import { WeatherScene } from './components/3d/WeatherScene.tsx'
+import { WeatherCard } from './components/ui/WeatherCard.tsx'
+import { getWmoCodeInfo } from './utils/wmoCode'
 
 interface LocationData {
+  id: string
   latitude: number
   longitude: number
   label: string
 }
 
-const DEFAULT_LOCATION: LocationData = {
-  latitude: 40.7128,
-  longitude: -74.006,
-  label: 'New York City (fallback)',
+type LocationSource = 'device' | 'fallback' | 'search' | 'saved'
+type TemperatureUnit = 'celsius' | 'fahrenheit'
+type WindSpeedUnit = 'kmh' | 'mph'
+type TimeFormat = '12h' | '24h'
+
+export interface AppSettings {
+  temperatureUnit: TemperatureUnit
+  windSpeedUnit: WindSpeedUnit
+  timeFormat: TimeFormat
 }
 
-function getCurrentLocation(): Promise<LocationData> {
+interface CachedWeatherSnapshot {
+  weather: WeatherData
+  location: LocationData
+  cachedAt: string
+}
+
+const DEFAULT_LOCATION: LocationData = {
+  id: 'default-la',
+  latitude: 34.0522,
+  longitude: -118.2437,
+  label: 'Los Angeles, USA (fallback)',
+}
+
+const SAVED_LOCATIONS_KEY = 'interactive-weather.saved-locations.v1'
+const SETTINGS_KEY = 'interactive-weather.settings.v1'
+const ONBOARDING_KEY = 'interactive-weather.onboarding-complete.v1'
+const WEATHER_CACHE_KEY = 'interactive-weather.cached-weather.v1'
+const MAX_SAVED_LOCATIONS = 8
+
+const DEFAULT_SETTINGS: AppSettings = {
+  temperatureUnit: 'celsius',
+  windSpeedUnit: 'kmh',
+  timeFormat: '24h',
+}
+
+function createLocationId(latitude: number, longitude: number, label: string): string {
+  const slug = label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+
+  return `${slug}-${latitude.toFixed(4)}-${longitude.toFixed(4)}`
+}
+
+function normalizeLocation(location: Omit<LocationData, 'id'> & { id?: string }): LocationData {
+  return {
+    ...location,
+    id: location.id ?? createLocationId(location.latitude, location.longitude, location.label),
+  }
+}
+
+function readSavedLocations(): LocationData[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SAVED_LOCATIONS_KEY)
+
+    if (!raw) {
+      return []
+    }
+
+    const parsed = JSON.parse(raw) as unknown
+
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed
+      .filter((item): item is Omit<LocationData, 'id'> & { id?: string } => {
+        return (
+          typeof item === 'object' &&
+          item !== null &&
+          typeof item.latitude === 'number' &&
+          typeof item.longitude === 'number' &&
+          typeof item.label === 'string'
+        )
+      })
+      .map((item) => normalizeLocation(item))
+      .slice(0, MAX_SAVED_LOCATIONS)
+  } catch {
+    return []
+  }
+}
+
+function readSettings(): AppSettings {
+  if (typeof window === 'undefined') {
+    return DEFAULT_SETTINGS
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_KEY)
+
+    if (!raw) {
+      return DEFAULT_SETTINGS
+    }
+
+    const parsed = JSON.parse(raw) as Partial<AppSettings>
+
+    return {
+      temperatureUnit:
+        parsed.temperatureUnit === 'fahrenheit' ? 'fahrenheit' : 'celsius',
+      windSpeedUnit: parsed.windSpeedUnit === 'mph' ? 'mph' : 'kmh',
+      timeFormat: parsed.timeFormat === '12h' ? '12h' : '24h',
+    }
+  } catch {
+    return DEFAULT_SETTINGS
+  }
+}
+
+function readOnboardingComplete(): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  return window.localStorage.getItem(ONBOARDING_KEY) === 'true'
+}
+
+function getCachedWeatherKey(locationId: string): string {
+  return `${WEATHER_CACHE_KEY}.${locationId}`
+}
+
+function readCachedWeather(locationId: string): CachedWeatherSnapshot | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const raw = window.localStorage.getItem(getCachedWeatherKey(locationId))
+
+    if (!raw) {
+      return null
+    }
+
+    const parsed = JSON.parse(raw) as CachedWeatherSnapshot
+
+    if (
+      typeof parsed.cachedAt !== 'string' ||
+      typeof parsed.weather?.updatedAt !== 'string' ||
+      typeof parsed.location?.label !== 'string'
+    ) {
+      return null
+    }
+
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeCachedWeather(snapshot: CachedWeatherSnapshot) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(
+    getCachedWeatherKey(snapshot.location.id),
+    JSON.stringify(snapshot),
+  )
+}
+
+function getCurrentLocation(): Promise<{
+  location: LocationData
+  source: LocationSource
+}> {
   if (typeof navigator === 'undefined' || !navigator.geolocation) {
-    return Promise.resolve(DEFAULT_LOCATION)
+    return Promise.resolve({
+      location: DEFAULT_LOCATION,
+      source: 'fallback',
+    })
   }
 
   return new Promise((resolve) => {
     navigator.geolocation.getCurrentPosition(
       ({ coords }) => {
+        const location = normalizeLocation({
+            latitude: coords.latitude,
+            longitude: coords.longitude,
+            label: 'Your location',
+          })
+
         resolve({
-          latitude: coords.latitude,
-          longitude: coords.longitude,
-          label: 'Your location',
+          location,
+          source: 'device',
         })
       },
       () => {
-        resolve(DEFAULT_LOCATION)
+        resolve({
+          location: DEFAULT_LOCATION,
+          source: 'fallback',
+        })
       },
       {
         maximumAge: 300_000,
@@ -42,12 +220,55 @@ function getCurrentLocation(): Promise<LocationData> {
 
 function App() {
   const [weather, setWeather] = useState<WeatherData | null>(null)
-  const [location, setLocation] = useState<LocationData | null>(null)
+  const [activeLocation, setActiveLocation] = useState<LocationData | null>(
+    DEFAULT_LOCATION,
+  )
+  const [locationSource, setLocationSource] = useState<LocationSource>('fallback')
+  const [settings, setSettings] = useState<AppSettings>(() => readSettings())
+  const [onboardingComplete, setOnboardingComplete] = useState(() =>
+    readOnboardingComplete(),
+  )
+  const [savedLocations, setSavedLocations] = useState<LocationData[]>(() =>
+    readSavedLocations(),
+  )
+  const [searchResults, setSearchResults] = useState<LocationData[]>([])
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [staleNotice, setStaleNotice] = useState<string | null>(null)
   const [requestKey, setRequestKey] = useState(0)
 
   useEffect(() => {
+    if (!onboardingComplete) {
+      return
+    }
+
+    let active = true
+
+    async function initializeLocation() {
+      const currentLocation = await getCurrentLocation()
+
+      if (active) {
+        setActiveLocation(currentLocation.location)
+        setLocationSource(currentLocation.source)
+      }
+    }
+
+    void initializeLocation()
+
+    return () => {
+      active = false
+    }
+  }, [onboardingComplete])
+
+  useEffect(() => {
+    if (!activeLocation) {
+      return
+    }
+
+    const locationToLoad = activeLocation
+
     let active = true
 
     async function loadWeather() {
@@ -55,30 +276,44 @@ function App() {
         if (active) {
           setLoading(true)
           setError(null)
-          setWeather(null)
+          setStaleNotice(null)
         }
-
-        const currentLocation = await getCurrentLocation()
-
-        if (!active) {
-          return
-        }
-
-        setLocation(currentLocation)
 
         const data = await fetchCurrentWeather(
-          currentLocation.latitude,
-          currentLocation.longitude,
+          locationToLoad.latitude,
+          locationToLoad.longitude,
         )
 
         if (active) {
           setWeather(data)
           setError(null)
+          setStaleNotice(null)
+          writeCachedWeather({
+            weather: data,
+            location: locationToLoad,
+            cachedAt: new Date().toISOString(),
+          })
         }
       } catch {
         if (active) {
-          setWeather(null)
-          setError('Unable to load weather right now.')
+          const cachedWeather = readCachedWeather(locationToLoad.id)
+
+          if (cachedWeather) {
+            setWeather(cachedWeather.weather)
+            setError(null)
+            setStaleNotice(
+              `Showing saved forecast from ${new Date(
+                cachedWeather.cachedAt,
+              ).toLocaleString()}.`,
+            )
+          } else {
+            setWeather(null)
+            setError(
+              navigator.onLine
+                ? 'Weather service is not responding right now.'
+                : 'You appear to be offline. Connect to refresh the forecast.',
+            )
+          }
         }
       } finally {
         if (active) {
@@ -92,22 +327,150 @@ function App() {
     return () => {
       active = false
     }
-  }, [requestKey])
+  }, [activeLocation, requestKey])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.localStorage.setItem(SAVED_LOCATIONS_KEY, JSON.stringify(savedLocations))
+  }, [savedLocations])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+  }, [settings])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.localStorage.setItem(
+      ONBOARDING_KEY,
+      onboardingComplete ? 'true' : 'false',
+    )
+  }, [onboardingComplete])
+
+  async function handleSearch(query: string) {
+    const normalizedQuery = query.trim()
+
+    if (normalizedQuery.length < 2) {
+      setSearchResults([])
+      setSearchError(null)
+      return
+    }
+
+    try {
+      setSearchLoading(true)
+      setSearchError(null)
+
+      const matches = await searchLocationsByName(normalizedQuery)
+      setSearchResults(matches.map((location) => normalizeLocation(location)))
+    } catch {
+      setSearchResults([])
+      setSearchError('Could not search locations right now.')
+    } finally {
+      setSearchLoading(false)
+    }
+  }
+
+  function handleSearchLocationSelect(location: LocationData) {
+    setActiveLocation({ ...location })
+    setLocationSource('search')
+    setOnboardingComplete(true)
+    setSearchResults([])
+    setSearchError(null)
+  }
+
+  function handleSavedLocationSelect(location: LocationData) {
+    setActiveLocation({ ...location })
+    setLocationSource('saved')
+    setOnboardingComplete(true)
+    setSearchResults([])
+    setSearchError(null)
+  }
+
+  async function handleUseDeviceLocation() {
+    setLoading(true)
+    const currentLocation = await getCurrentLocation()
+    setActiveLocation(currentLocation.location)
+    setLocationSource(currentLocation.source)
+    setOnboardingComplete(true)
+  }
+
+  function handleUseDefaultLocation() {
+    setActiveLocation(DEFAULT_LOCATION)
+    setLocationSource('fallback')
+    setOnboardingComplete(true)
+  }
+
+  function handleSaveLocation() {
+    if (!activeLocation) {
+      return
+    }
+
+    setSavedLocations((currentLocations) => {
+      const deduplicated = currentLocations.filter(
+        (location) => location.id !== activeLocation.id,
+      )
+
+      return [activeLocation, ...deduplicated].slice(0, MAX_SAVED_LOCATIONS)
+    })
+  }
+
+  function handleDeleteSavedLocation(locationId: string) {
+    setSavedLocations((currentLocations) =>
+      currentLocations.filter((location) => location.id !== locationId),
+    )
+  }
+
+  const isActiveLocationSaved = activeLocation
+    ? savedLocations.some((location) => location.id === activeLocation.id)
+    : false
+
+  const mood = getWmoCodeInfo(weather?.weatherCode).mood
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden">
-      <div className="absolute inset-0">
+    <div className={`app-shell mood-${mood}`}>
+      <div className="scene-layer">
         <WeatherScene weatherCode={weather?.weatherCode ?? null} />
       </div>
+      <div className="atmosphere-grid" />
+      <div className="noise-layer" />
+      <div className="atmosphere-glow atmosphere-glow-left" />
+      <div className="atmosphere-glow atmosphere-glow-right" />
 
-      <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
-        <div className="pointer-events-auto w-full max-w-sm">
+      <div className="content-wrap">
+        <div className="w-full max-w-3xl">
           <WeatherCard
             weather={weather}
             loading={loading}
             error={error}
-            location={location}
+            location={activeLocation}
+            mood={mood}
+            locationSource={locationSource}
+            settings={settings}
+            onSettingsChange={setSettings}
+            onboardingComplete={onboardingComplete}
+            staleNotice={staleNotice}
+            isActiveLocationSaved={isActiveLocationSaved}
             onRetry={() => setRequestKey((value) => value + 1)}
+            onUseDeviceLocation={handleUseDeviceLocation}
+            onUseDefaultLocation={handleUseDefaultLocation}
+            onSearch={handleSearch}
+            searchResults={searchResults}
+            searchLoading={searchLoading}
+            searchError={searchError}
+            onSelectSearchLocation={handleSearchLocationSelect}
+            onSelectSavedLocation={handleSavedLocationSelect}
+            onSaveLocation={handleSaveLocation}
+            savedLocations={savedLocations}
+            onDeleteSavedLocation={handleDeleteSavedLocation}
           />
         </div>
       </div>
