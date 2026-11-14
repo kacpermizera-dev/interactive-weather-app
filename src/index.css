@@ -66,7 +66,7 @@ body {
 }
 
 .scene-layer {
-  position: absolute;
+  position: fixed;
   inset: 0;
   filter: grayscale(1) contrast(1.09);
   animation: scene-breathe 6.8s ease-in-out infinite;
