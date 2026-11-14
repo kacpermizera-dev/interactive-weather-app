@@ -218,6 +218,16 @@ function getCurrentLocation(): Promise<{
   })
 }
 
+/** True only if the visitor has already allowed location, so asking for it won't show a prompt. */
+async function hasLocationPermission(): Promise<boolean> {
+  try {
+    const status = await navigator.permissions.query({ name: 'geolocation' })
+    return status.state === 'granted'
+  } catch {
+    return false
+  }
+}
+
 function App() {
   const [weather, setWeather] = useState<WeatherData | null>(null)
   const [activeLocation, setActiveLocation] = useState<LocationData | null>(
@@ -239,14 +249,20 @@ function App() {
   const [staleNotice, setStaleNotice] = useState<string | null>(null)
   const [requestKey, setRequestKey] = useState(0)
 
+  // On load, only a returning visitor who has already allowed location gets it automatically.
+  // Never prompt here: the prompt belongs to the "Use my location" button.
   useEffect(() => {
-    if (!onboardingComplete) {
+    if (!readOnboardingComplete()) {
       return
     }
 
     let active = true
 
     async function initializeLocation() {
+      if (!(await hasLocationPermission())) {
+        return
+      }
+
       const currentLocation = await getCurrentLocation()
 
       if (active) {
@@ -260,7 +276,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [onboardingComplete])
+  }, [])
 
   useEffect(() => {
     if (!activeLocation) {
